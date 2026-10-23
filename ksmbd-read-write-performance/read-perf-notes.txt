@@ -1,0 +1,42 @@
+# 复用旧 READ perf，选择下一个优化检查点
+
+不是新性能测试。离线重解 `rw-path-check-I6H1xG` 的 READ P/U-NS 诊断：
+128 CPU/双 NUMA、1 job/1 channel/QD32/64 KiB。旧数据同时带 BPF，不能当 clean 性能依据。
+
+已核对原 perf 的 build ID 与 `/srv/smb-perf/linux/` 保留的 ELF：
+
+- kernel：`20f481fcbab1ecae78d257ab4bc9aa1f26eab56a`。
+- ksmbd：`a65182c849039c99918f16c5c670b6a61d05617a`。
+
+用 `perf script --no-inline`、匹配 vmlinux 和隔离 symfs 导出，未修改已运行内核。
+`decoded-stacks.tar.gz` 保留导出文本、build ID、解码日志。
+`*-hotspots.tsv` 只分类包含 ksmbd 发送函数的栈，已识别的中断/BPF 栈另列。
+其他模块没有补全符号，unknown 保留，不强行归因。
+
+| TCP sendmsg 内样本 | P | U-NS |
+| --- | ---: | ---: |
+| 已分类发送栈总数（排除已识别 IRQ/BPF） | 396 | 415 |
+| memcpy 叶节点 | 65 | 108 |
+| 页清零叶节点 | 83 | 68 |
+| unknown 叶节点 | 55 | 52 |
+
+观察：复制、TCP 分配页清零均是可见热点。样本份额不是函数耗时比例，不能据此
+分摊“多出的约 24 μs”，更不能由 P/NS 的原始样本数直接比较单位请求成本。
+锁自旋样本仍很突出，但已有 no-spin A/B 负收益，不重做该方案。
+
+## 只补一项检查
+
+当前干净核心、默认 PERCPU、RX 复用关闭，纯 READ 1 job/1 channel/QD32；
+不加载 BPF，以 99 Hz `cycles:k` 采 10s，核对复制/清零热点是否仍存在。
+
+```bash
+sudo bash /srv/smb-perf/rxbuf-ab/smb-read-send-profile.sh
+```
+
+约 1–2 分钟；只运行一个 case。复用已验证的 fio/服务恢复脚本，不装模块或内核，
+不改变 CPU/NUMA/IRQ 放置。输出 `read-send-profile-*/send-hotspots.tsv` 与 `cpu.data`。
+这轮虽然子脚本目录叫 clean，实际有 perf，必须按 **PROFILED** 看待，不纳入优化收益 A/B。
+
+若热点仍在，再审查 READ 响应到 TCP 的复制消除方案；当前发送是 kvec/kernel_sendmsg，
+需要检查页引用、异步 TCP 生命周期及异常回退，不能直接加一个零拷贝标志就宣称安全。
+若热点不在或样本不足，停止这个代码候选，不据旧重探针结果直接写补丁。
