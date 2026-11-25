@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width">
+<meta name="theme-color" content="#222" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#222" media="(prefers-color-scheme: dark)"><meta name="generator" content="Hexo 8.1.1">
+
+  <link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon-next.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/images/favicon-32x32-next.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/images/favicon-16x16-next.png">
+  <link rel="mask-icon" href="/images/logo.svg" color="#222">
+
+<link rel="stylesheet" href="/css/main.css">
+
+
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/7.0.0/css/all.min.css" integrity="sha256-VHqXKFhhMxcpubYf9xiWdCiojEbY9NexQ4jh8AxbvcM=" crossorigin="anonymous">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/animate.css/3.1.1/animate.min.css" integrity="sha256-PR7ttpcvz8qrF57fur/yAx1qXMFJeJFiA6pSzWi0OIE=" crossorigin="anonymous">
+
+<script class="next-config" data-name="main" type="application/json">{"hostname":"haryven.github.io","root":"/","images":"/images","scheme":"Gemini","darkmode":true,"version":"8.27.0","exturl":false,"sidebar":{"position":"left","width_expanded":320,"width_dual_column":240,"display":"post","padding":18,"offset":12,"avatar":{"url":"/images/avatar.png","rounded":true,"rotated":false}},"hljswrap":true,"codeblock":{"theme":{"light":"default","dark":"monokai"},"prism":{"light":"prism","dark":"prism-dark"},"copy_button":{"enable":true,"style":"mac"},"fold":{"enable":false,"height":500},"language":false},"bookmark":{"enable":false,"color":"#222","save":"auto"},"mediumzoom":false,"lazyload":false,"pangu":false,"comments":{"style":"tabs","active":null,"storage":true,"lazyload":false,"nav":null},"stickytabs":false,"motion":{"enable":true,"async":false,"duration":200,"transition":{"menu_item":"fadeInDown","post_block":"fadeIn","post_header":"fadeInDown","post_body":"fadeInDown","coll_header":"fadeInLeft","sidebar":"fadeInUp"}},"i18n":{"placeholder":"Searching...","empty":"We didn't find any results for the search: ${query}","hits_time":"${hits} results found in ${time} ms","hits":"${hits} results found"}}</script><script src="/js/config.js" defer></script>
+
+    <meta name="description" content="以一次 1 MiB 的 SMB2 READ 为例，分析 ksmbd 如何用 MSG_SPLICE_PAGES 发送文件数据，以及 TCP 一次发不完时发送队列如何保留数据页。">
+<meta property="og:type" content="article">
+<meta property="og:title" content="ksmbd 如何减少 SMB2 READ 发送路径上的数据拷贝">
+<meta property="og:url" content="https://haryven.github.io/ksmbd-read-msg-splice-pages/index.html">
+<meta property="og:site_name" content="我心依旧">
+<meta property="og:description" content="以一次 1 MiB 的 SMB2 READ 为例，分析 ksmbd 如何用 MSG_SPLICE_PAGES 发送文件数据，以及 TCP 一次发不完时发送队列如何保留数据页。">
+<meta property="og:locale" content="zh_CN">
+<meta property="og:image" content="https://haryven.github.io/ksmbd-read-msg-splice-pages/read-iov-fastpath-layout.png">
+<meta property="og:image" content="https://haryven.github.io/ksmbd-read-msg-splice-pages/tcp-tx-queue-memory-layout.png">
+<meta property="og:image" content="https://haryven.github.io/ksmbd-read-msg-splice-pages/read-splice-perf-comparison.png">
+<meta property="article:published_time" content="2026-11-23T16:00:00.000Z">
+<meta property="article:modified_time" content="2026-11-25T06:32:39.946Z">
+<meta property="article:author" content="harry wayen">
+<meta property="article:tag" content="MSG_SPLICE_PAGES">
+<meta property="article:tag" content="SMB">
+<meta property="article:tag" content="ksmbd">
+<meta property="article:tag" content="性能优化">
+<meta property="article:tag" content="零拷贝">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:image" content="https://haryven.github.io/ksmbd-read-msg-splice-pages/read-iov-fastpath-layout.png">
+
+
+<link rel="canonical" href="https://haryven.github.io/ksmbd-read-msg-splice-pages/">
+
+
+<script class="next-config" data-name="page" type="application/json">{"sidebar":"","isHome":false,"isPost":true,"lang":"zh-CN","comments":true,"permalink":"https://haryven.github.io/ksmbd-read-msg-splice-pages/","path":"/ksmbd-read-msg-splice-pages/","title":"ksmbd 如何减少 SMB2 READ 发送路径上的数据拷贝"}</script>
+
+<script class="next-config" data-name="calendar" type="application/json">""</script>
+<title>ksmbd 如何减少 SMB2 READ 发送路径上的数据拷贝 | 我心依旧</title>
+  
+
+
+
+
+
+
+
+
+  
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/animejs/3.2.1/anime.min.js" integrity="sha256-XL2inqUJaslATFnHdJOi9GfQ60on8Wx1C2H8DYiN1xY=" crossorigin="anonymous" defer></script>
+<script src="/js/utils.js" defer></script><script src="/js/motion.js" defer></script><script src="/js/sidebar.js" defer></script><script src="/js/next-boot.js" defer></script>
+
+  
+
+  <script class="next-config" data-name="mermaid" type="application/json">{"enable":true,"theme":{"light":"default","dark":"dark"},"js":{"url":"https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.10.1/mermaid.min.js","integrity":"sha256-BmQmdWDS8X2OTbrwELWK366LV6escyWhHHe0XCTU/Hk="}}</script>
+  <script src="/js/third-party/tags/mermaid.js" defer></script>
+
+
+
+
+
+  
+
+
+
+
+
+  <noscript>
+    <link rel="stylesheet" href="/css/noscript.css">
+  </noscript>
+</head>
+
+<body itemscope itemtype="http://schema.org/WebPage" class="use-motion">
+  <div class="headband"></div>
+
+  <main class="main">
+    <div class="column">
+      <header class="header" itemscope itemtype="http://schema.org/WPHeader"><div class="site-brand-container">
+  <div class="site-nav-toggle">
+    <div class="toggle" aria-label="切换导航栏" role="button">
+        <span class="toggle-line"></span>
+        <span class="toggle-line"></span>
+        <span class="toggle-line"></span>
+    </div>
+  </div>
+
+  <div class="site-meta">
+
+    <a href="/" class="brand" rel="start">
+      <i class="logo-line"></i>
+      <p class="site-title">我心依旧</p>
+      <i class="logo-line"></i>
+    </a>
+  </div>
+
+  <div class="site-nav-right">
+    <div class="toggle popup-trigger" aria-label="搜索" role="button">
+    </div>
+  </div>
+</div>
+
+
+
+<nav class="site-nav">
+  <ul class="main-menu menu"><li class="menu-item menu-item-home"><a href="/" rel="section"><i class="fa fa-home fa-fw"></i>Home</a></li><li class="menu-item menu-item-about"><a href="/about/" rel="section"><i class="fa fa-user fa-fw"></i>About</a></li><li class="menu-item menu-item-tags"><a href="/tags/" rel="section"><i class="fa fa-tags fa-fw"></i>Tags<span class="badge">9</span></a></li><li class="menu-item menu-item-categories"><a href="/categories/" rel="section"><i class="fa fa-th fa-fw"></i>Categories<span class="badge">2</span></a></li><li class="menu-item menu-item-archives"><a href="/archives/" rel="section"><i class="fa fa-archive fa-fw"></i>Archives<span class="badge">5</span></a></li>
+  </ul>
+</nav>
+
+
+
+
+</header>
+        
+  
+  <aside class="sidebar">
+
+    <div class="sidebar-inner sidebar-nav-active sidebar-toc-active">
+      <ul class="sidebar-nav">
+        <li class="sidebar-nav-toc">
+          文章目录
+        </li>
+        <li class="sidebar-nav-overview">
+          站点概览
+        </li>
+      </ul>
+
+      <div class="sidebar-panel-container">
+        <!--noindex-->
+        <div class="post-toc-wrap sidebar-panel">
+            <div class="post-toc animated"><ol class="nav"><li class="nav-item nav-level-2"><a class="nav-link" href="#%E4%B8%80%E3%80%81%E4%B8%80%E6%AC%A1-READ-%E5%93%8D%E5%BA%94%E9%87%8C%E7%9A%84%E6%95%B0%E6%8D%AE%E6%8B%B7%E8%B4%9D"><span class="nav-number">1.</span> <span class="nav-text">一、一次 READ 响应里的数据拷贝</span></a></li><li class="nav-item nav-level-2"><a class="nav-link" href="#%E4%BA%8C%E3%80%81%E4%B8%BA%E4%BB%80%E4%B9%88%E4%B8%8D%E8%83%BD%E7%9B%B4%E6%8E%A5%E5%8A%A0%E4%B8%8A-MSG-SPLICE-PAGES%EF%BC%9F"><span class="nav-number">2.</span> <span class="nav-text">二、为什么不能直接加上 MSG_SPLICE_PAGES？</span></a></li><li class="nav-item nav-level-2"><a class="nav-link" href="#%E4%B8%89%E3%80%81Patch-1%EF%BC%9A%E6%94%B9%E9%80%A0%E7%9B%B4%E6%8E%A5%E5%8F%91%E9%80%81%E8%B7%AF%E5%BE%84"><span class="nav-number">3.</span> <span class="nav-text">三、Patch 1：改造直接发送路径</span></a><ol class="nav-child"><li class="nav-item nav-level-3"><a class="nav-link" href="#1-%E8%BD%BD%E8%8D%B7%E5%88%86%E9%85%8D%EF%BC%9Afolio-alloc-%E4%BC%98%E5%85%88%EF%BC%8C-vmalloc-%E5%85%9C%E5%BA%95"><span class="nav-number">3.1.</span> <span class="nav-text">1. 载荷分配：folio_alloc 优先，__vmalloc 兜底</span></a></li><li class="nav-item nav-level-3"><a class="nav-link" href="#2-%E7%94%A8-page-frag-cache-%E5%A4%84%E7%90%86-84-%E5%AD%97%E8%8A%82%E5%8D%8F%E8%AE%AE%E5%A4%B4"><span class="nav-number">3.2.</span> <span class="nav-text">2. 用 page_frag_cache 处理 84 字节协议头</span></a></li><li class="nav-item nav-level-3"><a class="nav-link" href="#3-Patch-1-%E5%AE%9E%E6%B5%8B%E6%95%88%E6%9E%9C"><span class="nav-number">3.3.</span> <span class="nav-text">3. Patch 1 实测效果</span></a></li></ol></li><li class="nav-item nav-level-2"><a class="nav-link" href="#%E5%9B%9B%E3%80%81Patch-2%EF%BC%9A%E6%8A%8A%E9%A1%B5%E5%BC%95%E7%94%A8%E4%BF%9D%E7%95%99%E5%88%B0%E5%8F%91%E9%80%81%E9%98%9F%E5%88%97"><span class="nav-number">4.</span> <span class="nav-text">四、Patch 2：把页引用保留到发送队列</span></a><ol class="nav-child"><li class="nav-item nav-level-3"><a class="nav-link" href="#1-struct-tcp-tx-%E7%9A%84%E5%B8%83%E5%B1%80%E4%B8%8E%E5%81%8F%E7%A7%BB%E5%88%87%E5%88%86"><span class="nav-number">4.1.</span> <span class="nav-text">1. struct tcp_tx 的布局与偏移切分</span></a></li><li class="nav-item nav-level-3"><a class="nav-link" href="#2-%E4%B8%BA%E4%BB%80%E4%B9%88%E6%8A%8A%E5%8D%8F%E8%AE%AE%E5%A4%B4%E5%86%85%E8%81%94%E5%9C%A8-bvec-%E5%90%8E%E9%9D%A2%EF%BC%8C%E8%80%8C%E4%B8%8D%E6%98%AF%E5%A4%8D%E7%94%A8-tx-frag-cache%EF%BC%9F"><span class="nav-number">4.2.</span> <span class="nav-text">2. 为什么把协议头内联在 bvec 后面，而不是复用 tx_frag_cache？</span></a></li><li class="nav-item nav-level-3"><a class="nav-link" href="#3-%E9%98%9F%E5%88%97%E6%B5%81%E6%8E%A7%E8%AE%B0%E8%B4%A6%E4%B8%8E%E5%9B%9E%E9%80%80%E8%BE%B9%E7%95%8C"><span class="nav-number">4.3.</span> <span class="nav-text">3. 队列流控记账与回退边界</span></a></li><li class="nav-item nav-level-3"><a class="nav-link" href="#4-Patch-2-%E5%AE%9E%E6%B5%8B%E6%95%88%E6%9E%9C%EF%BC%88%E5%8F%A0%E5%8A%A0%E5%9C%A8-Patch-1-%E4%B9%8B%E4%B8%8A%EF%BC%89"><span class="nav-number">4.4.</span> <span class="nav-text">4. Patch 2 实测效果（叠加在 Patch 1 之上）</span></a></li></ol></li><li class="nav-item nav-level-2"><a class="nav-link" href="#%E4%BA%94%E3%80%81%E8%83%BD%E5%90%A6%E7%9B%B4%E6%8E%A5%E5%8F%91%E9%80%81%E9%A1%B5%E7%BC%93%E5%AD%98%E9%87%8C%E7%9A%84%E9%A1%B5%EF%BC%9F"><span class="nav-number">5.</span> <span class="nav-text">五、能否直接发送页缓存里的页？</span></a></li><li class="nav-item nav-level-2"><a class="nav-link" href="#%E5%85%AD%E3%80%81%E5%B0%8F%E7%BB%93"><span class="nav-number">6.</span> <span class="nav-text">六、小结</span></a></li></ol></div>
+        </div>
+        <!--/noindex-->
+
+        <div class="site-overview-wrap sidebar-panel">
+          <div class="site-author animated" itemprop="author" itemscope itemtype="http://schema.org/Person">
+  <p class="site-author-name" itemprop="name">harry wayen</p>
+  <div class="site-description" itemprop="description">nobody</div>
+</div>
+<div class="site-state-wrap animated">
+  <nav class="site-state">
+      <div class="site-state-item site-state-posts">
+        <a href="/archives/">
+          <span class="site-state-item-count">5</span>
+          <span class="site-state-item-name">posts</span>
+        </a>
+      </div>
+      <div class="site-state-item site-state-categories">
+          <a href="/categories/">
+        <span class="site-state-item-count">2</span>
+        <span class="site-state-item-name">categories</span></a>
+      </div>
+      <div class="site-state-item site-state-tags">
+          <a href="/tags/">
+        <span class="site-state-item-count">9</span>
+        <span class="site-state-item-name">tags</span></a>
+      </div>
+  </nav>
+</div>
+  <div class="links-of-author animated">
+      <span class="links-of-author-item">
+        <a href="https://github.com/haryven" title="GitHub → https:&#x2F;&#x2F;github.com&#x2F;haryven" rel="noopener me" target="_blank"><i class="fab fa-github fa-fw"></i>GitHub</a>
+      </span>
+      <span class="links-of-author-item">
+        <a href="mailto:huiwen.he@linux.dev" title="E-Mail → mailto:huiwen.he@linux.dev" rel="noopener me" target="_blank"><i class="fa fa-envelope fa-fw"></i>E-Mail</a>
+      </span>
+  </div>
+  <div class="cc-license animated" itemprop="license">
+    <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" class="cc-opacity" rel="noopener" target="_blank"><img src="https://cdnjs.cloudflare.com/ajax/libs/creativecommons-vocabulary/2020.11.3/assets/license_badges/small/by_nc_sa.svg" alt="Creative Commons"></a>
+  </div>
+
+        </div>
+      </div>
+    </div>
+
+    
+  </aside>
+
+
+    </div>
+
+    <div class="main-inner post posts-expand">
+
+
+  
+
+
+<div class="post-block">
+  
+  
+
+  <article itemscope itemtype="http://schema.org/Article" class="post-content" lang="zh-CN">
+    <link itemprop="mainEntityOfPage" href="https://haryven.github.io/ksmbd-read-msg-splice-pages/">
+
+    <span hidden itemprop="author" itemscope itemtype="http://schema.org/Person">
+      <meta itemprop="image" content="/images/avatar.gif">
+      <meta itemprop="name" content="harry wayen">
+    </span>
+
+    <span hidden itemprop="publisher" itemscope itemtype="http://schema.org/Organization">
+      <meta itemprop="name" content="我心依旧">
+      <meta itemprop="description" content="nobody">
+    </span>
+
+    <span hidden itemprop="post" itemscope itemtype="http://schema.org/CreativeWork">
+      <meta itemprop="name" content="ksmbd 如何减少 SMB2 READ 发送路径上的数据拷贝 | 我心依旧">
+      <meta itemprop="description" content="以一次 1 MiB 的 SMB2 READ 为例，分析 ksmbd 如何用 MSG_SPLICE_PAGES 发送文件数据，以及 TCP 一次发不完时发送队列如何保留数据页。">
+    </span>
+      <header class="post-header">
+        <h1 class="post-title" itemprop="name headline">
+          ksmbd 如何减少 SMB2 READ 发送路径上的数据拷贝
+        </h1>
+
+        <div class="post-meta-container">
+          <div class="post-meta">
+    <span class="post-meta-item">
+      <span class="post-meta-item-icon">
+        <i class="far fa-calendar"></i>
+      </span>
+      <span class="post-meta-item-text">发表于</span>
+
+      <time title="创建时间：2026-11-24 00:00:00" itemprop="dateCreated datePublished" datetime="2026-11-24T00:00:00+08:00">2026-11-24</time>
+    </span>
+    <span class="post-meta-item">
+      <span class="post-meta-item-icon">
+        <i class="far fa-calendar-check"></i>
+      </span>
+      <span class="post-meta-item-text">更新于</span>
+      <time title="修改时间：2026-11-25 14:32:39" itemprop="dateModified" datetime="2026-11-25T14:32:39+08:00">2026-11-25</time>
+    </span>
+    <span class="post-meta-item">
+      <span class="post-meta-item-icon">
+        <i class="far fa-folder"></i>
+      </span>
+      <span class="post-meta-item-text">分类于</span>
+        <span itemprop="about" itemscope itemtype="http://schema.org/Thing">
+          <a href="/categories/Linux-%E5%86%85%E6%A0%B8/" itemprop="url" rel="index"><span itemprop="name">Linux 内核</span></a>
+        </span>
+    </span>
+
+  
+</div>
+
+            <div class="post-description">以一次 1 MiB 的 SMB2 READ 为例，分析 ksmbd 如何用 MSG_SPLICE_PAGES 发送文件数据，以及 TCP 一次发不完时发送队列如何保留数据页。</div>
+        </div>
+      </header>
+
+    
+    
+    
+    <div class="post-body" itemprop="articleBody"><p><strong>中文</strong> · <a href="/en/ksmbd-read-msg-splice-pages/">English</a></p>
+<p>在 ksmbd 原来的 SMB2 READ 发送路径上，即便文件已经命中页缓存，1 MiB 的读响应在发给客户端前仍要经历两次内存拷贝；高并发下如果 TCP 发送缓冲区打满、响应被迫排队，未发完的部分甚至还要多拷一次。针对直接发送和排队发送这两条路径，我们向 linux-cifs 提交了<a target="_blank" rel="noopener" href="https://lore.kernel.org/linux-cifs/20261124132554.1185817-1-huiwen.he@linux.dev">两个补丁</a>：用 <code>MSG_SPLICE_PAGES</code> 把数据页直接交给 TCP，并让发送队列直接保留未发送页的引用。在 4 通道、1 MiB 顺序读测试中，吞吐从 6660 提升到 8255.6 MiB&#x2F;s，宿主机每传输 1 GiB 数据消耗的 CPU 周期下降了 55%。</p>
+<span id="more"></span>
+
+<h2 id="一、一次-READ-响应里的数据拷贝"><a href="#一、一次-READ-响应里的数据拷贝" class="headerlink" title="一、一次 READ 响应里的数据拷贝"></a>一、一次 READ 响应里的数据拷贝</h2><p>以命中页缓存的 1 MiB 顺序读为例，ksmbd 首先通过 <code>kernel_read()</code> 把文件数据从页缓存拷到自己的 <code>aux_payload_buf</code>。接下来还会发生几次拷贝，取决于 TCP 能不能立刻接下这个响应：</p>
+<p>如果发送路径空闲，ksmbd 会直接调用 <code>kernel_sendmsg()</code>，TCP 协议栈把数据从 <code>aux_payload_buf</code> 拷进 <code>skb</code>，算上读文件一共是两次拷贝。但如果队列里还有上一个没发完的响应，或者这次 <code>kernel_sendmsg()</code> 只发出去一部分，ksmbd 就得把剩余数据先拷进发送队列的 <code>tcp_tx-&gt;data</code>；等后台的 <code>ksmbd_tcp_tx_work</code> 再次发送时，TCP 还要再把这部分数据拷进 <code>skb</code>。这一趟下来，进入队列的数据总共要拷三次。</p>
+<pre><code class="highlight mermaid">flowchart LR
+    subgraph Before[&quot;优化前：排队数据最多拷贝 3 次&quot;]
+        PC1[&quot;Page Cache&quot;] --&gt;|&quot;拷贝 1: kernel_read&quot;| BUF1[&quot;aux_payload_buf&quot;]
+        BUF1 --&gt;|&quot;快路径 拷贝 2&quot;| SKB1[&quot;TCP skb&quot;]
+        BUF1 --&gt;|&quot;慢路径 拷贝 2&quot;| Q1[&quot;tcp_tx-&gt;data 队列缓冲&quot;]
+        Q1 --&gt;|&quot;慢路径 拷贝 3&quot;| SKB1
+    end
+
+    subgraph After[&quot;命中优化路径：载荷只在读取时拷贝 1 次&quot;]
+        PC2[&quot;Page Cache&quot;] --&gt;|&quot;拷贝 1: kernel_read&quot;| BUF2[&quot;folio / vmalloc 页&quot;]
+        BUF2 --&gt;|&quot;快路径: MSG_SPLICE_PAGES 移交页引用&quot;| SKB2[&quot;TCP skb&quot;]
+        BUF2 --&gt;|&quot;慢路径: folio_get 保留页引用&quot;| Q2[&quot;tcp_tx-&gt;bvec 队列&quot;]
+        Q2 --&gt;|&quot;worker: MSG_SPLICE_PAGES&quot;| SKB2
+    end</code></pre>
+
+<p>这次的两个补丁都保留了 <code>kernel_read()</code> 的第一次拷贝：Patch 1 打通直接发送路径，让 TCP 直接引用 READ 缓冲区的物理页；Patch 2 把这套机制延伸到发送队列，让未发完的数据继续留在原页上，等 TCP 有空间时再接着发。</p>
+<h2 id="二、为什么不能直接加上-MSG-SPLICE-PAGES？"><a href="#二、为什么不能直接加上-MSG-SPLICE-PAGES？" class="headerlink" title="二、为什么不能直接加上 MSG_SPLICE_PAGES？"></a>二、为什么不能直接加上 <code>MSG_SPLICE_PAGES</code>？</h2><p>普通 <code>sendmsg</code> 会把数据逐字节拷进 TCP 自己的发送缓冲区，而带上 <code>MSG_SPLICE_PAGES</code> 后，TCP 可以直接把载荷所在的物理页挂到 <code>skb</code> 上，并通过 <code>get_page()</code> 增加页引用计数。这样一来，ksmbd 在发送调用返回后就能立刻释放自己的引用，TCP 持有的那份引用则会一直保留到网卡发完并释放 <code>skb</code> 时再归还，整个过程不需要拷贝载荷，也不会出现释放后访问的问题。</p>
+<p>但这套机制对内存来源有前提：TCP 必须在 ksmbd 释放缓冲区之后仍能安全地持有这一页，内核用 <code>sendpage_ok(page)</code> 来做这项检查。ksmbd 原先用来存响应头和载荷的内存，并不都满足这个条件：</p>
+<table>
+<thead>
+<tr>
+<th>内存来源</th>
+<th>底层机制</th>
+<th>能否 <code>MSG_SPLICE_PAGES</code>？</th>
+<th>原因</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>kzalloc</code> &#x2F; <code>kmalloc</code></td>
+<td>小对象通常来自 slab，大块分配可能来自伙伴系统</td>
+<td><strong>不保证</strong></td>
+<td>slab 页上的对象不能按独立页交给 TCP</td>
+</tr>
+<tr>
+<td><code>kvmalloc</code></td>
+<td>先尝试 <code>kmalloc</code>，必要时回退到 <code>vmalloc</code></td>
+<td><strong>不保证</strong></td>
+<td>需要区分实际分配来源</td>
+</tr>
+<tr>
+<td><strong><code>folio_alloc</code></strong></td>
+<td>伙伴系统分配的整块连续物理页</td>
+<td><strong>可以</strong></td>
+<td>原生支持 <code>folio_get()</code> &#x2F; <code>folio_put()</code></td>
+</tr>
+<tr>
+<td><strong><code>__vmalloc</code></strong></td>
+<td>物理页映射为连续的虚拟地址</td>
+<td><strong>可以</strong></td>
+<td>每个底层页都可以单独持有引用</td>
+</tr>
+<tr>
+<td><strong><code>page_frag_alloc</code></strong></td>
+<td>从页中分配片段</td>
+<td><strong>可以</strong></td>
+<td>片段通过底层页的引用维持生命周期</td>
+</tr>
+</tbody></table>
+<h2 id="三、Patch-1：改造直接发送路径"><a href="#三、Patch-1：改造直接发送路径" class="headerlink" title="三、Patch 1：改造直接发送路径"></a>三、Patch 1：改造直接发送路径</h2><p>在 ksmbd 里，一个标准的 SMB2 READ 响应由 <code>work-&gt;iov[0..2]</code> 三段组成（以读取 1 MiB 为例，总长 <code>1,048,660</code> 字节）：</p>
+<img src="/ksmbd-read-msg-splice-pages/read-iov-fastpath-layout.png" class="" title="SMB2 READ 快路径内存布局与 MSG_SPLICE_PAGES 页引用交接">
+
+<p>想让整包响应走一次 <code>MSG_SPLICE_PAGES</code> 发出去，需要同时解决两件事：一是把 1 MiB 载荷放到可 splice 的页里，二是处理好前面那 84 字节位于 slab 中的协议头。</p>
+<h3 id="1-载荷分配：folio-alloc-优先，-vmalloc-兜底"><a href="#1-载荷分配：folio-alloc-优先，-vmalloc-兜底" class="headerlink" title="1. 载荷分配：folio_alloc 优先，__vmalloc 兜底"></a>1. 载荷分配：<code>folio_alloc</code> 优先，<code>__vmalloc</code> 兜底</h3><p>对于走 TCP 的普通明文、非复合 READ 请求，只要读取长度不小于 <code>PAGE_SIZE</code>（4 KiB 页系统下即 4 KiB），<code>smb2_alloc_read_buf()</code> 会按两级策略分配载荷缓冲区：</p>
+<ol>
+<li><strong>优先 <code>folio_alloc(GFP_NOWAIT | __GFP_NOWARN | __GFP_NORETRY, order)</code></strong>：在 4 KiB 页系统上，1 MiB 对应一个 order-8 folio（256 个连续物理页）。它直接使用内核线性映射，既不用建立 vmalloc 页表，也没有 <code>vfree()</code> 带来的跨核 TLB shootdown 开销。</li>
+<li><strong>连续大页拿不到时回退 <code>__vmalloc(size, GFP_KERNEL | __GFP_NORETRY | __GFP_NOWARN)</code></strong>：系统运行久了、物理内存碎片化后，高阶分配可能失败，这时用分散的 4 KiB 物理页拼出虚拟连续内存，依然能同时满足 <code>kernel_read()</code> 和 <code>MSG_SPLICE_PAGES</code>。</li>
+</ol>
+<p>在确定这个方案前，我们也试过把 <code>folio_alloc + kernel_read</code> 换成 <code>bio_vec[] + vfs_iter_read</code>，但实测下来读进连续大 folio 更快，所以最终保留了现有的读取方式，只改动缓冲区分配和发送路径。</p>
+<p>实际落地时还有两个边界需要兜底。第一个是<strong>短读</strong>：如果客户端请求读 1 MiB、分配了 1 MiB 的大 folio，结果文件只剩 100 KiB 就到 EOF，把这 100 KiB 直接 splice 给 TCP 会让网络栈在传输期间一直占着整块 1 MiB 物理内存。因此当实际读到的字节数满足 <code>get_order(length) &lt; folio_order(folio)</code> 时，直接回退到拷贝路径，立刻释放大页。第二个是 <strong><code>__vmalloc</code> 的缓存一致性</strong>：<code>kernel_read()</code> 通过 vmalloc 虚拟地址写入数据，而 TCP 和网卡随后通过物理页的线性映射读取，在存在缓存别名的 CPU 架构上，发送前需要先调用 <code>flush_kernel_vmap_range()</code> 刷新缓存。</p>
+<h3 id="2-用-page-frag-cache-处理-84-字节协议头"><a href="#2-用-page-frag-cache-处理-84-字节协议头" class="headerlink" title="2. 用 page_frag_cache 处理 84 字节协议头"></a>2. 用 <code>page_frag_cache</code> 处理 84 字节协议头</h3><p>响应前部的 <code>iov[0]</code>（4 字节长度字段）和 <code>iov[1]</code>（80 字节 SMB2 响应头）位于 slab 分配的 <code>response_buf</code> 中，不能直接 splice。如果把协议头和载荷拆成两次发送，每次 READ 都要调两次 <code>sendmsg</code>、抢两次 <code>lock_sock(sk)</code>，对 4 KiB &#x2F; 64 KiB 这类小包开销太大。</p>
+<p>参考 NFSD（<code>net/sunrpc/svcsock.c</code>）的做法，我们在每条 TCP 连接上挂了一个 <code>page_frag_cache</code>。发送时先用 <code>page_frag_alloc()</code> 切出 84 字节，把长度字段和响应头拷进去，再把这 84 字节和后面的 1 MiB 载荷合并成一次带 <code>MSG_SPLICE_PAGES</code> 的 <code>kernel_sendmsg()</code> 交给 TCP。虽然这 84 字节仍要拷贝一次，但省掉了后面 1 MiB 载荷的拷贝，同时也保留了单次加锁发送的优势。</p>
+<p>整个直接发送路径的引用计数交接时序如下：</p>
+<pre><code class="highlight mermaid">sequenceDiagram
+    participant W as smb2_read / ksmbd_work
+    participant T as ksmbd_tcp_send
+    participant TCP as TCP 协议栈 (skb)
+
+    W-&gt;&gt;W: folio_alloc (ref=1) + kernel_read 填充数据
+    W-&gt;&gt;T: ksmbd_conn_write(work)
+    T-&gt;&gt;T: page_frag_alloc 分配 84B header (ref=1) 并拷贝头
+    T-&gt;&gt;TCP: kernel_sendmsg(MSG_SPLICE_PAGES, [header, payload])
+    TCP-&gt;&gt;TCP: 对 header 和 payload 页执行 get_page (ref=2)
+    T-&gt;&gt;T: page_frag_free(header) 释放自身引用 (header ref=1)
+    T--&gt;&gt;W: 返回成功
+    W-&gt;&gt;W: ksmbd_free_work_struct -&gt; folio_put (payload ref=1)
+    Note over TCP: TCP 释放 skb 时归还持有的页引用</code></pre>
+
+<h3 id="3-Patch-1-实测效果"><a href="#3-Patch-1-实测效果" class="headerlink" title="3. Patch 1 实测效果"></a>3. Patch 1 实测效果</h3><p>测试环境为 128 逻辑核 Xeon Gold 6430 宿主机 + 4 vCPU virtio-net 虚拟机，客户端通过 SMB3.1.1 读取 tmpfs（16 并发 fio 顺序读，每任务 QD32）：</p>
+<table>
+<thead>
+<tr>
+<th align="right">Channels</th>
+<th>I&#x2F;O 大小</th>
+<th align="right">吞吐变化 (MiB&#x2F;s)</th>
+<th align="right">宿主 CPU 周期变化 (Gcycles&#x2F;GiB)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="right">1</td>
+<td>4 KiB</td>
+<td align="right">288.3 → 287.5 (-0.3%)</td>
+<td align="right">27.347 → 27.850 (+1.8%)</td>
+</tr>
+<tr>
+<td align="right">1</td>
+<td>64 KiB</td>
+<td align="right">1975.3 → 2536.1 (<strong>+28.4%</strong>)</td>
+<td align="right">6.815 → 4.668 (<strong>-31.5%</strong>)</td>
+</tr>
+<tr>
+<td align="right">1</td>
+<td>256 KiB</td>
+<td align="right">2007.2 → 3228.5 (<strong>+60.8%</strong>)</td>
+<td align="right">7.515 → 4.468 (<strong>-40.5%</strong>)</td>
+</tr>
+<tr>
+<td align="right">1</td>
+<td>1 MiB</td>
+<td align="right">2058.7 → 3119.9 (<strong>+51.5%</strong>)</td>
+<td align="right">5.446 → 3.646 (<strong>-33.1%</strong>)</td>
+</tr>
+<tr>
+<td align="right">4</td>
+<td>64 KiB</td>
+<td align="right">4260.4 → 4427.3 (<strong>+3.9%</strong>)</td>
+<td align="right">3.207 → 2.985 (<strong>-6.9%</strong>)</td>
+</tr>
+<tr>
+<td align="right">4</td>
+<td>256 KiB</td>
+<td align="right">6270.3 → 7026.3 (<strong>+12.1%</strong>)</td>
+<td align="right">3.418 → 1.948 (<strong>-43.0%</strong>)</td>
+</tr>
+<tr>
+<td align="right">4</td>
+<td>1 MiB</td>
+<td align="right">6660.0 → 7833.2 (<strong>+17.6%</strong>)</td>
+<td align="right">3.879 → 2.347 (<strong>-39.5%</strong>)</td>
+</tr>
+</tbody></table>
+<p>从数据看，载荷越大收益越明显：4 KiB 读的瓶颈主要在协议处理和调度开销，省掉载荷拷贝几乎看不出差异；单通道 256 KiB 的吞吐则直接提升了 60.8%。不过到了 4 通道 1 MiB 的高并发场景，吞吐只涨了 17.6%，宿主 CPU 周期仍有 2.347 Gcycles&#x2F;GiB。继续排查发送统计后发现，高并发下 TCP 发送缓冲区经常打满，有 <strong>16.2%</strong> 的响应字节没能走成快路径，而是掉进了发送队列里。</p>
+<h2 id="四、Patch-2：把页引用保留到发送队列"><a href="#四、Patch-2：把页引用保留到发送队列" class="headerlink" title="四、Patch 2：把页引用保留到发送队列"></a>四、Patch 2：把页引用保留到发送队列</h2><p>有两种情况会让 READ 响应进入 <code>tt-&gt;tx_queue</code>：一是队列里已经有尚未发完的响应，新响应必须排在后面保序；二是直接发送只发出去了一部分（short send），剩余部分要入队等后续发送。</p>
+<p>棘手之处在于生命周期：<code>ksmbd_tcp_writev()</code> 一旦返回，上层很快就会释放 <code>ksmbd_work</code> 和 READ 缓冲区，但入队的数据可能还在等 TCP 腾出空间。旧实现只能把未发送的数据先拷进 <code>tcp_tx-&gt;data[]</code>，等后台 worker 发送时再让 TCP 拷一遍。Patch 2 把这套逻辑改成了由队列项 <code>struct tcp_tx</code> 直接持有未发送数据页的引用，直到整包发完或队列项被清理。</p>
+<h3 id="1-struct-tcp-tx-的布局与偏移切分"><a href="#1-struct-tcp-tx-的布局与偏移切分" class="headerlink" title="1. struct tcp_tx 的布局与偏移切分"></a>1. <code>struct tcp_tx</code> 的布局与偏移切分</h3><img src="/ksmbd-read-msg-splice-pages/tcp-tx-queue-memory-layout.png" class="" title="struct tcp_tx 内存布局及部分发送后的头和载荷">
+
+<p>队列项的设计主要围绕三个细节展开：</p>
+<ol>
+<li><strong>零增长的结构体布局</strong>：在 64 位布局下，<code>msg_flags</code> 后面原本就有 4 字节对齐空隙（偏移 <code>52..55</code>）。新增的 <code>nr_vecs</code> 和 <code>header_len</code> 各占 2 字节，刚好填进这个空隙，结构体固定部分的大小没有增加。</li>
+<li><strong>按发送偏移切分头和载荷</strong>：入队时的 <code>offset</code> 可能还落在协议头里，也可能已经发到载荷中间。因为载荷始终排在最后，只要三行减法就能算出剩余的载荷长度和协议头长度：<figure class="highlight c"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line"><span class="type">size_t</span> left = tx-&gt;size - offset;          <span class="comment">// 总共还剩多少字节没发</span></span><br><span class="line"><span class="type">size_t</span> len  = min(left, payload.iov_len); <span class="comment">// 其中 payload 还剩多少字节没发</span></span><br><span class="line"><span class="type">size_t</span> head = left - len;                 <span class="comment">// 其中 84B 协议头还剩多少字节没发</span></span><br></pre></td></tr></table></figure>
+比如队列非空、<code>offset = 0</code> 时，<code>head = 84</code>、<code>len = 1 MiB</code>，把 84 字节头拷到 <code>bvec</code> 尾部的内联区，保留整块 1 MiB 载荷页引用；如果已经发了 100 字节（84B 头 + 16B 数据），算出来 <code>head = 0</code>、<code>len = 1,048,560</code>，直接跳过前 16B，不需要再存任何协议头。</li>
+<li><strong>适配单 folio 与 <code>vmalloc</code>，统一在最后加引用</strong>：单 folio 只需要 1 个 <code>bvec</code>（<code>bvec_set_virt</code>），<code>vmalloc</code> 则通过 <code>iov_iter_extract_bvecs()</code> 按页拆出物理页数组。所有校验和头拷贝全部完成后，再统一对这些页执行 <code>folio_get()</code>——这样一旦前面出错，释放路径只需要一行 <code>kvfree(msg)</code>，不用处理复杂的局部引用回滚。</li>
+</ol>
+<h3 id="2-为什么把协议头内联在-bvec-后面，而不是复用-tx-frag-cache？"><a href="#2-为什么把协议头内联在-bvec-后面，而不是复用-tx-frag-cache？" class="headerlink" title="2. 为什么把协议头内联在 bvec 后面，而不是复用 tx_frag_cache？"></a>2. 为什么把协议头内联在 <code>bvec</code> 后面，而不是复用 <code>tx_frag_cache</code>？</h3><p>初版其实沿用了快路径的思路：同样从 <code>tx_frag_cache</code> 分配协议头，再把头塞进 <code>bvec[0]</code> 一起 splice。但在代码评审时，我们意识到排队发送和直接发送有一个关键区别——<strong>发送队列必须对滞留内存做流控记账</strong>，复用 <code>tx_frag_cache</code> 会带来两个问题：</p>
+<ul>
+<li><strong>共享页被重复记账</strong>：<code>tx_frag_cache</code> 底层是一块 32 KiB 大页。如果按 <code>folio_size(header)</code> 逐项记账，哪怕 32 个响应的 84 字节头共享同一个 32 KiB 页，队列配额也会被扣掉 <code>32 × 32 KiB = 1 MiB</code>，很容易提前触发流控。</li>
+<li><strong>小 <code>sk_sndbuf</code> 下空队列也会失败</strong>：当 <code>sk_sndbuf &lt;= tx-&gt;size</code> 时，总记账值 <code>32 KiB + payload</code> 必然超过队列上限，哪怕队列是空的也会被迫退回拷贝路径。</li>
+</ul>
+<p>最终我们把尚未发完的协议头直接拷到 <code>msg-&gt;bvec</code> 后面的内联区域，按真实的剩余头长 <code>head</code> 记账。后台 worker 的发送顺序也相应拆成两步：如果还有协议头没发完，先用普通 <code>sock_sendmsg</code> 发出去，并带上 <code>MSG_MORE</code> 提示 TCP 后面还有数据；头发完后，立刻在下一轮循环用 <code>MSG_SPLICE_PAGES</code> 发送载荷页。</p>
+<pre><code class="highlight mermaid">flowchart TD
+    Start[&quot;ksmbd_tcp_tx_work 取队头 msg (单次持锁 budget=16)&quot;] --&gt; CheckMode&#123;&quot;msg-&gt;nr_vecs &gt; 0 ?&quot;&#125;
+    CheckMode --&gt;|&quot;否 (拷贝模式)&quot;| SendData[&quot;普通发送 msg-&gt;data + offset&quot;]
+    CheckMode --&gt;|&quot;是 (零拷贝模式)&quot;| CheckHdr&#123;&quot;offset &lt; header_len ?&quot;&#125;
+    CheckHdr --&gt;|&quot;是 (还有头没发完)&quot;| SendHdr[&quot;发送内联 header + MSG_MORE&quot;]
+    CheckHdr --&gt;|&quot;否 (头已发完)&quot;| SendSplice[&quot;MSG_SPLICE_PAGES 发送 msg-&gt;bvec&quot;]
+
+    SendData --&gt; Update[&quot;统一更新 msg-&gt;offset += ret 和 tx_sent += ret&quot;]
+    SendHdr --&gt; Update
+    SendSplice --&gt; Update
+
+    Update --&gt; Done&#123;&quot;offset == len ?&quot;&#125;
+    Done --&gt;|&quot;是 (整包发完)&quot;| Free[&quot;扣减 tx_queued, 出队, folio_put 释放页&quot;]
+    Done --&gt;|&quot;否&quot;| HdrDone&#123;&quot;offset == header_len ?&quot;&#125;
+    HdrDone --&gt;|&quot;是 (刚发完头)&quot;| Continue[&quot;continue 立即续发 payload&quot;]
+    HdrDone --&gt;|&quot;否 (TCP 缓冲又满)&quot;| Wait[&quot;退出循环, 等 write_space 唤醒&quot;]</code></pre>
+
+<h3 id="3-队列流控记账与回退边界"><a href="#3-队列流控记账与回退边界" class="headerlink" title="3. 队列流控记账与回退边界"></a>3. 队列流控记账与回退边界</h3><p>遇到慢客户端时，数据页会在发送队列里停留很久，如果只按剩余字节数记账，会低估队列实际占住的物理内存。因此保留页引用时，记账值按 <code>head</code> 加上所有保留 folio 的实际大小来算，一旦超出队列上限 <code>max(sk_sndbuf, pdu_size)</code> 就回退到拷贝路径。</p>
+<p>同样地，为了避免少量未发完的“小尾巴”把整块大页钉死在队列里，如果剩余数据不足 <code>PAGE_SIZE</code>，或者满足 <code>get_order(len) &lt; folio_order(folio)</code>，也直接只拷贝剩余部分，尽快释放大页。</p>
+<h3 id="4-Patch-2-实测效果（叠加在-Patch-1-之上）"><a href="#4-Patch-2-实测效果（叠加在-Patch-1-之上）" class="headerlink" title="4. Patch 2 实测效果（叠加在 Patch 1 之上）"></a>4. Patch 2 实测效果（叠加在 Patch 1 之上）</h3><p>每组优化均与同批次重跑的基线对比（因此不同批次间的基线数值会有小幅波动）：</p>
+<table>
+<thead>
+<tr>
+<th align="right">Channels</th>
+<th>I&#x2F;O 大小</th>
+<th align="right">吞吐变化 (MiB&#x2F;s)</th>
+<th align="right">宿主 CPU 周期变化 (Gcycles&#x2F;GiB)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="right">1</td>
+<td>256 KiB</td>
+<td align="right">3243.4 → 3414.6 (<strong>+5.3%</strong>)</td>
+<td align="right">4.511 → 3.497 (<strong>-22.5%</strong>)</td>
+</tr>
+<tr>
+<td align="right">1</td>
+<td>1 MiB</td>
+<td align="right">3145.6 → 3435.5 (<strong>+9.2%</strong>)</td>
+<td align="right">3.578 → 2.425 (<strong>-32.2%</strong>)</td>
+</tr>
+<tr>
+<td align="right">4</td>
+<td>64 KiB</td>
+<td align="right">4337.1 → 4448.3 (<strong>+2.6%</strong>)</td>
+<td align="right">2.977 → 3.000 (+0.8%)</td>
+</tr>
+<tr>
+<td align="right">4</td>
+<td>1 MiB</td>
+<td align="right">7705.3 → 8255.6 (<strong>+7.1%</strong>)</td>
+<td align="right">2.673 → 1.746 (<strong>-34.7%</strong>)</td>
+</tr>
+</tbody></table>
+<img src="/ksmbd-read-msg-splice-pages/read-splice-perf-comparison.png" class="" title="ksmbd READ 零拷贝优化各阶段实测收益对比">
+
+<p>两步合起来看，4 通道 1 MiB 下队列 worker 的拷贝字节占比从 <strong>16.2% 降到了 1.0%</strong>，P99 延迟从约 <strong>203 ms 降到 105 ms</strong>；整体吞吐从 <strong>6660 提升到 8255.6 MiB&#x2F;s（+24%）</strong>，宿主机每 GiB 的 CPU 周期从 <strong>3.879 降到 1.746 Gcycles（-55%）</strong>。</p>
+<h2 id="五、能否直接发送页缓存里的页？"><a href="#五、能否直接发送页缓存里的页？" class="headerlink" title="五、能否直接发送页缓存里的页？"></a>五、能否直接发送页缓存里的页？</h2><p>这两个补丁都还保留了 <code>kernel_read()</code> 从页缓存到 READ 缓冲区的那次拷贝。既然 NFSD 的 <code>nfsd_splice_read</code> 可以直接把文件页缓存里的页交给 TCP，ksmbd 走这条路还能再省多少？</p>
+<p>我们在只读挂载的 tmpfs 上复用这两片补丁搭好的传输与队列骨架，做了一组 VFS splice 原型验证（结果见上图右侧斜线柱）：4 通道、1 MiB 顺序读吞吐从 <strong>8292 进一步提到 8981 MiB&#x2F;s（+8.3%）</strong>，每 GiB 的宿主 CPU 周期也从 <strong>1.712 再降到 1.228 Gcycles（-28.3%）</strong>。</p>
+<p>原型刻意选了只读挂载的 tmpfs，是因为页缓存直发在可写共享上会撞上一个经典难题：TCP 持有页引用只能保证这一页不会被回收，却无法阻止并发写入。在可写共享上，如果数据页已经交给了 TCP，但在网卡发出或丢包重传之前，另一个 SMB 客户端或本地进程改写了同一文件页，发出去的字节就会中途变化；开启 SMB 签名时，接收端甚至会直接验签失败。</p>
+<p>因此，当前这两个补丁仍然把文件数据读进 ksmbd 私有页，保证对所有可写和只读共享都安全。页缓存直发更适合作为独立方案继续评估——先针对只读挂载的文件系统（<code>sb_rdonly</code>）开启，至于可写共享，还需要理清 SMB Read Lease &#x2F; Oplock 能约束哪些写入，以及本地进程并发写该如何处理。</p>
+<h2 id="六、小结"><a href="#六、小结" class="headerlink" title="六、小结"></a>六、小结</h2><p>回过头看这组数据，消除载荷拷贝对较大的 SMB2 READ 请求收益最明显，而在高并发场景下，只改直接发送还远远不够——当 TCP 发送缓冲区频繁打满时，排队路径如何保存剩余数据会立刻成为新的瓶颈，Patch 2 单独就让 4 通道 1 MiB 的宿主 CPU 周期又降了 34.7%。</p>
+<p>实现上，把所有边界情况（小包、短读、队列小尾巴、内存超限、加密或压缩）都统一回退到原有的拷贝路径，既避免把零拷贝的复杂度扩散到冷路径里，也能在慢客户端场景下稳住内存上限，整体方案更容易验证，也更好维护。</p>
+
+    </div>
+
+    
+    
+    
+
+    <footer class="post-footer">
+          
+
+<div class="post-copyright">
+<ul>
+  <li class="post-copyright-author">
+      <strong>本文作者： </strong>harry wayen
+  </li>
+  <li class="post-copyright-link">
+      <strong>本文链接：</strong>
+      <a href="https://haryven.github.io/ksmbd-read-msg-splice-pages/" title="ksmbd 如何减少 SMB2 READ 发送路径上的数据拷贝">https://haryven.github.io/ksmbd-read-msg-splice-pages/</a>
+  </li>
+  <li class="post-copyright-license">
+      <strong>版权声明： </strong>本博客所有文章除特别声明外，均采用 <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" rel="noopener" target="_blank"><i class="fab fa-fw fa-creative-commons"></i>BY-NC-SA</a> 许可协议。转载请注明出处！
+  </li>
+</ul>
+</div>
+
+          <div class="post-tags">
+              <a href="/tags/ksmbd/" rel="tag"># ksmbd</a>
+              <a href="/tags/SMB/" rel="tag"># SMB</a>
+              <a href="/tags/%E6%80%A7%E8%83%BD%E4%BC%98%E5%8C%96/" rel="tag"># 性能优化</a>
+              <a href="/tags/%E9%9B%B6%E6%8B%B7%E8%B4%9D/" rel="tag"># 零拷贝</a>
+              <a href="/tags/MSG-SPLICE-PAGES/" rel="tag"># MSG_SPLICE_PAGES</a>
+          </div>
+
+        
+
+          <div class="post-nav">
+            <div class="post-nav-item">
+                <a href="/ksmbd-read-write-performance/" rel="prev" title="ksmbd 读写性能瓶颈分析与优化实践">
+                  <i class="fa fa-angle-left"></i> ksmbd 读写性能瓶颈分析与优化实践
+                </a>
+            </div>
+            <div class="post-nav-item">
+                <a href="/en/ksmbd-read-msg-splice-pages/" rel="next" title="How ksmbd reduces data copies when sending SMB2 READ responses">
+                  How ksmbd reduces data copies when sending SMB2 READ responses <i class="fa fa-angle-right"></i>
+                </a>
+            </div>
+          </div>
+    </footer>
+  </article>
+</div>
+
+
+
+
+
+
+</div>
+  </main>
+
+  <footer class="footer">
+    <div class="footer-inner">
+
+  <div class="copyright">
+    &copy; 
+    <span itemprop="copyrightYear">2026</span>
+    <span class="with-love">
+      <i class="fa fa-heart"></i>
+    </span>
+    <span class="author" itemprop="copyrightHolder">harry wayen</span>
+  </div>
+  <div class="powered-by">Powered by <a href="https://hexo.io/" rel="noopener" target="_blank">Hexo</a> & <a href="https://theme-next.js.org/" rel="noopener" target="_blank">NexT.Gemini</a>
+  </div>
+
+    </div>
+  </footer>
+
+  
+  <div class="toggle sidebar-toggle" role="button">
+    <span class="toggle-line"></span>
+    <span class="toggle-line"></span>
+    <span class="toggle-line"></span>
+  </div>
+  <div class="sidebar-dimmer"></div>
+  <div class="back-to-top" role="button" aria-label="Back to top">
+    <i class="fa fa-arrow-up fa-lg"></i>
+    <span>0%</span>
+  </div>
+
+<noscript>
+  <div class="noscript-warning">Theme NexT works best with JavaScript enabled</div>
+</noscript>
+
+</body>
+</html>

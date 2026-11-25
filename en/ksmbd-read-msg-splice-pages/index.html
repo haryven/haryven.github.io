@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width">
+<meta name="theme-color" content="#222" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#222" media="(prefers-color-scheme: dark)"><meta name="generator" content="Hexo 8.1.1">
+
+  <link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon-next.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/images/favicon-32x32-next.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/images/favicon-16x16-next.png">
+  <link rel="mask-icon" href="/images/logo.svg" color="#222">
+
+<link rel="stylesheet" href="/css/main.css">
+
+
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/7.0.0/css/all.min.css" integrity="sha256-VHqXKFhhMxcpubYf9xiWdCiojEbY9NexQ4jh8AxbvcM=" crossorigin="anonymous">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/animate.css/3.1.1/animate.min.css" integrity="sha256-PR7ttpcvz8qrF57fur/yAx1qXMFJeJFiA6pSzWi0OIE=" crossorigin="anonymous">
+
+<script class="next-config" data-name="main" type="application/json">{"hostname":"haryven.github.io","root":"/","images":"/images","scheme":"Gemini","darkmode":true,"version":"8.27.0","exturl":false,"sidebar":{"position":"left","width_expanded":320,"width_dual_column":240,"display":"post","padding":18,"offset":12,"avatar":{"url":"/images/avatar.png","rounded":true,"rotated":false}},"hljswrap":true,"codeblock":{"theme":{"light":"default","dark":"monokai"},"prism":{"light":"prism","dark":"prism-dark"},"copy_button":{"enable":true,"style":"mac"},"fold":{"enable":false,"height":500},"language":false},"bookmark":{"enable":false,"color":"#222","save":"auto"},"mediumzoom":false,"lazyload":false,"pangu":false,"comments":{"style":"tabs","active":null,"storage":true,"lazyload":false,"nav":null},"stickytabs":false,"motion":{"enable":true,"async":false,"duration":200,"transition":{"menu_item":"fadeInDown","post_block":"fadeIn","post_header":"fadeInDown","post_body":"fadeInDown","coll_header":"fadeInLeft","sidebar":"fadeInUp"}},"i18n":{"placeholder":"Searching...","empty":"We didn't find any results for the search: ${query}","hits_time":"${hits} results found in ${time} ms","hits":"${hits} results found"}}</script><script src="/js/config.js" defer></script>
+
+    <meta name="description" content="中文 · English Even on a page-cache hit, ksmbd used to copy a 1 MiB SMB2 READ payload twice before sending it to the client. If the TCP send buffer filled up, the part that had to wait in the queue incu">
+<meta property="og:type" content="article">
+<meta property="og:title" content="How ksmbd reduces data copies when sending SMB2 READ responses">
+<meta property="og:url" content="https://haryven.github.io/en/ksmbd-read-msg-splice-pages/index.html">
+<meta property="og:site_name" content="我心依旧">
+<meta property="og:description" content="中文 · English Even on a page-cache hit, ksmbd used to copy a 1 MiB SMB2 READ payload twice before sending it to the client. If the TCP send buffer filled up, the part that had to wait in the queue incu">
+<meta property="og:locale" content="en_US">
+<meta property="og:image" content="https://haryven.github.io/ksmbd-read-msg-splice-pages/read-iov-fastpath-layout.png">
+<meta property="og:image" content="https://haryven.github.io/ksmbd-read-msg-splice-pages/tcp-tx-queue-memory-layout.png">
+<meta property="og:image" content="https://haryven.github.io/ksmbd-read-msg-splice-pages/read-splice-perf-comparison.png">
+<meta property="article:published_time" content="2026-11-23T16:00:00.000Z">
+<meta property="article:modified_time" content="2026-11-25T06:32:39.946Z">
+<meta property="article:author" content="harry wayen">
+<meta property="article:tag" content="MSG_SPLICE_PAGES">
+<meta property="article:tag" content="SMB">
+<meta property="article:tag" content="ksmbd">
+<meta property="article:tag" content="性能优化">
+<meta property="article:tag" content="零拷贝">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:image" content="https://haryven.github.io/ksmbd-read-msg-splice-pages/read-iov-fastpath-layout.png">
+
+
+<link rel="canonical" href="https://haryven.github.io/en/ksmbd-read-msg-splice-pages/">
+
+
+<script class="next-config" data-name="page" type="application/json">{"sidebar":"","isHome":false,"isPost":true,"lang":"en","comments":true,"permalink":"https://haryven.github.io/en/ksmbd-read-msg-splice-pages/","path":"/en/ksmbd-read-msg-splice-pages/","title":"How ksmbd reduces data copies when sending SMB2 READ responses"}</script>
+
+<script class="next-config" data-name="calendar" type="application/json">""</script>
+<title>How ksmbd reduces data copies when sending SMB2 READ responses | 我心依旧</title>
+  
+
+
+
+
+
+
+
+
+  
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/animejs/3.2.1/anime.min.js" integrity="sha256-XL2inqUJaslATFnHdJOi9GfQ60on8Wx1C2H8DYiN1xY=" crossorigin="anonymous" defer></script>
+<script src="/js/utils.js" defer></script><script src="/js/motion.js" defer></script><script src="/js/sidebar.js" defer></script><script src="/js/next-boot.js" defer></script>
+
+  
+
+  <script class="next-config" data-name="mermaid" type="application/json">{"enable":true,"theme":{"light":"default","dark":"dark"},"js":{"url":"https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.10.1/mermaid.min.js","integrity":"sha256-BmQmdWDS8X2OTbrwELWK366LV6escyWhHHe0XCTU/Hk="}}</script>
+  <script src="/js/third-party/tags/mermaid.js" defer></script>
+
+
+
+
+
+  
+
+
+
+
+
+  <noscript>
+    <link rel="stylesheet" href="/css/noscript.css">
+  </noscript>
+</head>
+
+<body itemscope itemtype="http://schema.org/WebPage" class="use-motion">
+  <div class="headband"></div>
+
+  <main class="main">
+    <div class="column">
+      <header class="header" itemscope itemtype="http://schema.org/WPHeader"><div class="site-brand-container">
+  <div class="site-nav-toggle">
+    <div class="toggle" aria-label="Toggle navigation bar" role="button">
+        <span class="toggle-line"></span>
+        <span class="toggle-line"></span>
+        <span class="toggle-line"></span>
+    </div>
+  </div>
+
+  <div class="site-meta">
+
+    <a href="/" class="brand" rel="start">
+      <i class="logo-line"></i>
+      <p class="site-title">我心依旧</p>
+      <i class="logo-line"></i>
+    </a>
+  </div>
+
+  <div class="site-nav-right">
+    <div class="toggle popup-trigger" aria-label="Search" role="button">
+    </div>
+  </div>
+</div>
+
+
+
+<nav class="site-nav">
+  <ul class="main-menu menu"><li class="menu-item menu-item-home"><a href="/" rel="section"><i class="fa fa-home fa-fw"></i>Home</a></li><li class="menu-item menu-item-about"><a href="/about/" rel="section"><i class="fa fa-user fa-fw"></i>About</a></li><li class="menu-item menu-item-tags"><a href="/tags/" rel="section"><i class="fa fa-tags fa-fw"></i>Tags<span class="badge">9</span></a></li><li class="menu-item menu-item-categories"><a href="/categories/" rel="section"><i class="fa fa-th fa-fw"></i>Categories<span class="badge">2</span></a></li><li class="menu-item menu-item-archives"><a href="/archives/" rel="section"><i class="fa fa-archive fa-fw"></i>Archives<span class="badge">5</span></a></li>
+  </ul>
+</nav>
+
+
+
+
+</header>
+        
+  
+  <aside class="sidebar">
+
+    <div class="sidebar-inner sidebar-nav-active sidebar-toc-active">
+      <ul class="sidebar-nav">
+        <li class="sidebar-nav-toc">
+          Table of Contents
+        </li>
+        <li class="sidebar-nav-overview">
+          Overview
+        </li>
+      </ul>
+
+      <div class="sidebar-panel-container">
+        <!--noindex-->
+        <div class="post-toc-wrap sidebar-panel">
+            <div class="post-toc animated"><ol class="nav"><li class="nav-item nav-level-2"><a class="nav-link" href="#Where-the-copies-happen"><span class="nav-number">1.</span> <span class="nav-text">Where the copies happen</span></a></li><li class="nav-item nav-level-2"><a class="nav-link" href="#Which-buffers-can-TCP-reference"><span class="nav-number">2.</span> <span class="nav-text">Which buffers can TCP reference?</span></a></li><li class="nav-item nav-level-2"><a class="nav-link" href="#Patch-1-Sending-directly-from-the-READ-buffer"><span class="nav-number">3.</span> <span class="nav-text">Patch 1. Sending directly from the READ buffer</span></a><ol class="nav-child"><li class="nav-item nav-level-3"><a class="nav-link" href="#Allocating-the-payload"><span class="nav-number">3.1.</span> <span class="nav-text">Allocating the payload</span></a></li><li class="nav-item nav-level-3"><a class="nav-link" href="#Handling-the-84-byte-header"><span class="nav-number">3.2.</span> <span class="nav-text">Handling the 84-byte header</span></a></li><li class="nav-item nav-level-3"><a class="nav-link" href="#Patch-1-results"><span class="nav-number">3.3.</span> <span class="nav-text">Patch 1 results</span></a></li></ol></li><li class="nav-item nav-level-2"><a class="nav-link" href="#Patch-2-Keeping-page-references-in-the-send-queue"><span class="nav-number">4.</span> <span class="nav-text">Patch 2. Keeping page references in the send queue</span></a><ol class="nav-child"><li class="nav-item nav-level-3"><a class="nav-link" href="#Recording-what-remains-after-a-short-send"><span class="nav-number">4.1.</span> <span class="nav-text">Recording what remains after a short send</span></a></li><li class="nav-item nav-level-3"><a class="nav-link" href="#Why-store-the-queued-header-inline"><span class="nav-number">4.2.</span> <span class="nav-text">Why store the queued header inline?</span></a></li><li class="nav-item nav-level-3"><a class="nav-link" href="#Bounding-the-memory-held-by-the-queue"><span class="nav-number">4.3.</span> <span class="nav-text">Bounding the memory held by the queue</span></a></li><li class="nav-item nav-level-3"><a class="nav-link" href="#Patch-2-results-with-Patch-1-already-applied"><span class="nav-number">4.4.</span> <span class="nav-text">Patch 2 results, with Patch 1 already applied</span></a></li></ol></li><li class="nav-item nav-level-2"><a class="nav-link" href="#Could-TCP-send-the-page-cache-pages-directly"><span class="nav-number">5.</span> <span class="nav-text">Could TCP send the page-cache pages directly?</span></a></li><li class="nav-item nav-level-2"><a class="nav-link" href="#What-the-measurements-show"><span class="nav-number">6.</span> <span class="nav-text">What the measurements show</span></a></li></ol></div>
+        </div>
+        <!--/noindex-->
+
+        <div class="site-overview-wrap sidebar-panel">
+          <div class="site-author animated" itemprop="author" itemscope itemtype="http://schema.org/Person">
+  <p class="site-author-name" itemprop="name">harry wayen</p>
+  <div class="site-description" itemprop="description">nobody</div>
+</div>
+<div class="site-state-wrap animated">
+  <nav class="site-state">
+      <div class="site-state-item site-state-posts">
+        <a href="/archives/">
+          <span class="site-state-item-count">5</span>
+          <span class="site-state-item-name">posts</span>
+        </a>
+      </div>
+      <div class="site-state-item site-state-categories">
+          <a href="/categories/">
+        <span class="site-state-item-count">2</span>
+        <span class="site-state-item-name">categories</span></a>
+      </div>
+      <div class="site-state-item site-state-tags">
+          <a href="/tags/">
+        <span class="site-state-item-count">9</span>
+        <span class="site-state-item-name">tags</span></a>
+      </div>
+  </nav>
+</div>
+  <div class="links-of-author animated">
+      <span class="links-of-author-item">
+        <a href="https://github.com/haryven" title="GitHub → https:&#x2F;&#x2F;github.com&#x2F;haryven" rel="noopener me" target="_blank"><i class="fab fa-github fa-fw"></i>GitHub</a>
+      </span>
+      <span class="links-of-author-item">
+        <a href="mailto:huiwen.he@linux.dev" title="E-Mail → mailto:huiwen.he@linux.dev" rel="noopener me" target="_blank"><i class="fa fa-envelope fa-fw"></i>E-Mail</a>
+      </span>
+  </div>
+  <div class="cc-license animated" itemprop="license">
+    <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" class="cc-opacity" rel="noopener" target="_blank"><img src="https://cdnjs.cloudflare.com/ajax/libs/creativecommons-vocabulary/2020.11.3/assets/license_badges/small/by_nc_sa.svg" alt="Creative Commons"></a>
+  </div>
+
+        </div>
+      </div>
+    </div>
+
+    
+  </aside>
+
+
+    </div>
+
+    <div class="main-inner post posts-expand">
+
+
+  
+
+
+<div class="post-block">
+  
+  
+
+  <article itemscope itemtype="http://schema.org/Article" class="post-content" lang="en">
+    <link itemprop="mainEntityOfPage" href="https://haryven.github.io/en/ksmbd-read-msg-splice-pages/">
+
+    <span hidden itemprop="author" itemscope itemtype="http://schema.org/Person">
+      <meta itemprop="image" content="/images/avatar.gif">
+      <meta itemprop="name" content="harry wayen">
+    </span>
+
+    <span hidden itemprop="publisher" itemscope itemtype="http://schema.org/Organization">
+      <meta itemprop="name" content="我心依旧">
+      <meta itemprop="description" content="nobody">
+    </span>
+
+    <span hidden itemprop="post" itemscope itemtype="http://schema.org/CreativeWork">
+      <meta itemprop="name" content="How ksmbd reduces data copies when sending SMB2 READ responses | 我心依旧">
+      <meta itemprop="description" content="">
+    </span>
+      <header class="post-header">
+        <h1 class="post-title" itemprop="name headline">
+          How ksmbd reduces data copies when sending SMB2 READ responses
+        </h1>
+
+        <div class="post-meta-container">
+          <div class="post-meta">
+    <span class="post-meta-item">
+      <span class="post-meta-item-icon">
+        <i class="far fa-calendar"></i>
+      </span>
+      <span class="post-meta-item-text">Posted on</span>
+
+      <time title="Created: 2026-11-24 00:00:00" itemprop="dateCreated datePublished" datetime="2026-11-24T00:00:00+08:00">2026-11-24</time>
+    </span>
+    <span class="post-meta-item">
+      <span class="post-meta-item-icon">
+        <i class="far fa-calendar-check"></i>
+      </span>
+      <span class="post-meta-item-text">Edited on</span>
+      <time title="Modified: 2026-11-25 14:32:39" itemprop="dateModified" datetime="2026-11-25T14:32:39+08:00">2026-11-25</time>
+    </span>
+    <span class="post-meta-item">
+      <span class="post-meta-item-icon">
+        <i class="far fa-folder"></i>
+      </span>
+      <span class="post-meta-item-text">In</span>
+        <span itemprop="about" itemscope itemtype="http://schema.org/Thing">
+          <a href="/categories/Linux-%E5%86%85%E6%A0%B8/" itemprop="url" rel="index"><span itemprop="name">Linux 内核</span></a>
+        </span>
+    </span>
+
+  
+</div>
+
+        </div>
+      </header>
+
+    
+    
+    
+    <div class="post-body" itemprop="articleBody"><p><a href="/ksmbd-read-msg-splice-pages/">中文</a> · <strong>English</strong></p>
+<p>Even on a page-cache hit, ksmbd used to copy a 1 MiB SMB2 READ payload twice before sending it to the client. If the TCP send buffer filled up, the part that had to wait in the queue incurred a third copy. We sent <a target="_blank" rel="noopener" href="https://lore.kernel.org/linux-cifs/20261124132554.1185817-1-huiwen.he@linux.dev/">two patches to linux-cifs</a> to address both cases. The first lets TCP reference the data pages through <code>MSG_SPLICE_PAGES</code>. The second lets the send queue hold references to those same pages until TCP can take them. In our four-channel sequential read test with 1 MiB requests, throughput rose from 6660 to 8255.6 MiB&#x2F;s and the host spent 55% fewer CPU cycles per GiB transferred.</p>
+<span id="more"></span>
+
+<h2 id="Where-the-copies-happen"><a href="#Where-the-copies-happen" class="headerlink" title="Where the copies happen"></a>Where the copies happen</h2><p>Consider a 1 MiB sequential read served from the page cache. First, <code>kernel_read()</code> copies the file data into ksmbd’s <code>aux_payload_buf</code>. What happens next depends on whether TCP can accept the response immediately.</p>
+<p>If the send path is idle, ksmbd calls <code>kernel_sendmsg()</code> and TCP copies the payload into an <code>skb</code>. That makes two copies, including the file read. If an earlier response is still queued, or the send call accepts only part of this response, ksmbd copies the outstanding bytes into <code>tcp_tx-&gt;data</code>. Later, when the worker <code>ksmbd_tcp_tx_work</code> sends them, TCP copies those bytes into an <code>skb</code>. The queued portion has now been copied three times.</p>
+<pre><code class="highlight mermaid">flowchart LR
+    subgraph Before[&quot;Before: up to three copies for queued data&quot;]
+        P[&quot;Page cache&quot;] --&gt;|&quot;1. kernel_read&quot;| B[&quot;aux_payload_buf&quot;]
+        B --&gt;|&quot;2. Direct send&quot;| S[&quot;TCP skb&quot;]
+        B --&gt;|&quot;2. Enqueue&quot;| Q[&quot;tcp_tx-&gt;data&quot;]
+        Q --&gt;|&quot;3. Worker sends&quot;| S
+    end
+    subgraph After[&quot;Eligible reads: one payload copy&quot;]
+        P2[&quot;Page cache&quot;] --&gt;|&quot;1. kernel_read&quot;| B2[&quot;folio or vmalloc pages&quot;]
+        B2 --&gt;|&quot;Direct: MSG_SPLICE_PAGES&quot;| S2[&quot;TCP skb&quot;]
+        B2 --&gt;|&quot;Queued: hold page references&quot;| Q2[&quot;tcp_tx-&gt;bvec&quot;]
+        Q2 --&gt;|&quot;Worker: MSG_SPLICE_PAGES&quot;| S2
+    end</code></pre>
+
+<p>Both patches keep the first copy in <code>kernel_read()</code>. Patch 1 changes how TCP takes the pages on a direct send. Patch 2 extends that lifetime across a queue wait.</p>
+<h2 id="Which-buffers-can-TCP-reference"><a href="#Which-buffers-can-TCP-reference" class="headerlink" title="Which buffers can TCP reference?"></a>Which buffers can TCP reference?</h2><p>With an ordinary send, TCP copies the payload into its own send buffer. With <code>MSG_SPLICE_PAGES</code>, it can attach the payload pages to the <code>skb</code> and take page references. Once the send returns, ksmbd can drop its own references to the accepted data. TCP releases the references it holds when the <code>skb</code> is freed.</p>
+<p>This requires memory whose lifetime TCP can manage through page references. The kernel checks page eligibility with <code>sendpage_ok(page)</code>. Some of the buffers ksmbd used for headers and payloads lack that guarantee.</p>
+<table>
+<thead>
+<tr>
+<th>Allocation</th>
+<th>Backing memory</th>
+<th>Suitable for page splicing?</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>kzalloc</code> &#x2F; <code>kmalloc</code></td>
+<td>Small objects usually come from a slab. Large allocations may come from the buddy allocator.</td>
+<td>Depends on the backing memory. TCP cannot retain a slab object by taking a reference to its containing page.</td>
+</tr>
+<tr>
+<td><code>kvmalloc</code></td>
+<td>Tries <code>kmalloc</code> first and can fall back to <code>vmalloc</code>.</td>
+<td>Depends on which allocation succeeded.</td>
+</tr>
+<tr>
+<td><code>folio_alloc</code></td>
+<td>Physically contiguous pages from the buddy allocator</td>
+<td>Yes. The folio supports <code>folio_get()</code> and <code>folio_put()</code>.</td>
+</tr>
+<tr>
+<td><code>__vmalloc</code></td>
+<td>Individual pages mapped into a contiguous virtual range</td>
+<td>Yes. Each backing page can be referenced separately.</td>
+</tr>
+<tr>
+<td><code>page_frag_alloc</code></td>
+<td>Fragments allocated from a backing page</td>
+<td>Yes. A reference to the backing page keeps the fragment alive.</td>
+</tr>
+</tbody></table>
+<h2 id="Patch-1-Sending-directly-from-the-READ-buffer"><a href="#Patch-1-Sending-directly-from-the-READ-buffer" class="headerlink" title="Patch 1. Sending directly from the READ buffer"></a>Patch 1. Sending directly from the READ buffer</h2><p>A regular 1 MiB SMB2 READ response occupies three entries in <code>work-&gt;iov[0..2]</code> and totals 1,048,660 bytes. To submit all three entries in one call, ksmbd needs spliceable pages for both the 1 MiB payload and the 84 bytes preceding it.</p>
+<p><img src="/ksmbd-read-msg-splice-pages/read-iov-fastpath-layout.png" alt="The three READ response vectors and the backing pages used for a direct send"></p>
+<h3 id="Allocating-the-payload"><a href="#Allocating-the-payload" class="headerlink" title="Allocating the payload"></a>Allocating the payload</h3><p>For an eligible plaintext, non-compound READ over TCP, <code>smb2_alloc_read_buf()</code> uses the following allocation order when the request is at least <code>PAGE_SIZE</code> (4 KiB on the test system).</p>
+<ol>
+<li>Try <code>folio_alloc(GFP_NOWAIT | __GFP_NOWARN | __GFP_NORETRY, order)</code>. On a system with 4 KiB pages, a 1 MiB buffer fits in an order-8 folio of 256 contiguous pages. The kernel can use its linear mapping, avoiding vmalloc page tables and the cross-CPU TLB invalidation that freeing a vmalloc mapping can require.</li>
+<li>If the high-order allocation fails, use <code>__vmalloc(size, GFP_KERNEL | __GFP_NORETRY | __GFP_NOWARN)</code>. Even when physical memory is fragmented, the backing pages can form a contiguous virtual buffer for <code>kernel_read()</code>, and TCP can reference them individually.</li>
+</ol>
+<p>We also tried replacing <code>folio_alloc + kernel_read</code> with <code>bio_vec[] + vfs_iter_read</code>. Reading into a contiguous folio was faster in our tests, so we kept the read operation and changed the allocation and send paths.</p>
+<p>Two details matter here. First, a short read near EOF may fill only 100 KiB of a 1 MiB folio. Splicing those bytes would keep the entire folio alive during transmission. When <code>get_order(length) &lt; folio_order(folio)</code>, ksmbd falls back to copying and can release the large folio earlier. Second, <code>kernel_read()</code> writes through the vmalloc address, while the subsequent send uses the backing pages. On architectures with cache aliasing, <code>flush_kernel_vmap_range()</code> makes the writes visible before the send.</p>
+<h3 id="Handling-the-84-byte-header"><a href="#Handling-the-84-byte-header" class="headerlink" title="Handling the 84-byte header"></a>Handling the 84-byte header</h3><p>The 4-byte length field in <code>iov[0]</code> and the 80-byte SMB2 response header in <code>iov[1]</code> live in a slab-allocated <code>response_buf</code>. Splitting the header and payload into separate sends would mean two calls to <code>sendmsg</code> and two acquisitions of the socket lock per READ. That overhead matters more for small requests such as 4 KiB and 64 KiB.</p>
+<p>Following NFSD’s approach in <code>net/sunrpc/svcsock.c</code>, we keep a <code>page_frag_cache</code> on each TCP connection. For each response, <code>page_frag_alloc()</code> supplies an 84-byte fragment. We copy the length field and header there, then pass the fragment and the payload to TCP in one <code>kernel_sendmsg()</code> with <code>MSG_SPLICE_PAGES</code>. The header still costs an 84-byte copy. The 1 MiB payload can go through in the same call without a second copy.</p>
+<pre><code class="highlight mermaid">sequenceDiagram
+    participant W as smb2_read / ksmbd_work
+    participant T as ksmbd_tcp_send
+    participant TCP as TCP stack (skb)
+    W-&gt;&gt;W: Allocate folio and fill it with kernel_read
+    W-&gt;&gt;T: ksmbd_conn_write(work)
+    T-&gt;&gt;T: Allocate a page fragment and copy the header
+    T-&gt;&gt;TCP: kernel_sendmsg(MSG_SPLICE_PAGES, [header, payload])
+    TCP-&gt;&gt;TCP: Take references to the backing pages
+    T-&gt;&gt;T: Drop local header reference with page_frag_free
+    T--&gt;&gt;W: Return success
+    W-&gt;&gt;W: Drop payload reference when freeing work
+    Note over TCP: Release page references when the skb is freed</code></pre>
+
+<h3 id="Patch-1-results"><a href="#Patch-1-results" class="headerlink" title="Patch 1 results"></a>Patch 1 results</h3><p>The host was a Xeon Gold 6430 system with 128 logical CPUs. The VM used virtio-net and had four vCPUs. The client read from tmpfs over SMB 3.1.1 with 16 concurrent fio sequential-read jobs at queue depth 32 per job.</p>
+<table>
+<thead>
+<tr>
+<th align="right">Channels</th>
+<th>I&#x2F;O size</th>
+<th align="right">Throughput (MiB&#x2F;s)</th>
+<th align="right">Host CPU cost (Gcycles&#x2F;GiB)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="right">1</td>
+<td>4 KiB</td>
+<td align="right">288.3 → 287.5 (-0.3%)</td>
+<td align="right">27.347 → 27.850 (+1.8%)</td>
+</tr>
+<tr>
+<td align="right">1</td>
+<td>64 KiB</td>
+<td align="right">1975.3 → 2536.1 (<strong>+28.4%</strong>)</td>
+<td align="right">6.815 → 4.668 (<strong>-31.5%</strong>)</td>
+</tr>
+<tr>
+<td align="right">1</td>
+<td>256 KiB</td>
+<td align="right">2007.2 → 3228.5 (<strong>+60.8%</strong>)</td>
+<td align="right">7.515 → 4.468 (<strong>-40.5%</strong>)</td>
+</tr>
+<tr>
+<td align="right">1</td>
+<td>1 MiB</td>
+<td align="right">2058.7 → 3119.9 (<strong>+51.5%</strong>)</td>
+<td align="right">5.446 → 3.646 (<strong>-33.1%</strong>)</td>
+</tr>
+<tr>
+<td align="right">4</td>
+<td>64 KiB</td>
+<td align="right">4260.4 → 4427.3 (<strong>+3.9%</strong>)</td>
+<td align="right">3.207 → 2.985 (<strong>-6.9%</strong>)</td>
+</tr>
+<tr>
+<td align="right">4</td>
+<td>256 KiB</td>
+<td align="right">6270.3 → 7026.3 (<strong>+12.1%</strong>)</td>
+<td align="right">3.418 → 1.948 (<strong>-43.0%</strong>)</td>
+</tr>
+<tr>
+<td align="right">4</td>
+<td>1 MiB</td>
+<td align="right">6660.0 → 7833.2 (<strong>+17.6%</strong>)</td>
+<td align="right">3.879 → 2.347 (<strong>-39.5%</strong>)</td>
+</tr>
+</tbody></table>
+<p>At 4 KiB, protocol processing and scheduling leave little room for a payload-copy saving to show up in throughput. At 256 KiB on one channel, throughput rose 60.8%. With four channels and 1 MiB requests, throughput rose 17.6% and the host still spent 2.347 Gcycles&#x2F;GiB. The send counters pointed to the queue: under load, the TCP send buffer frequently filled up, and <strong>16.2% of response bytes</strong> went through the queue.</p>
+<h2 id="Patch-2-Keeping-page-references-in-the-send-queue"><a href="#Patch-2-Keeping-page-references-in-the-send-queue" class="headerlink" title="Patch 2. Keeping page references in the send queue"></a>Patch 2. Keeping page references in the send queue</h2><p>A response enters <code>tt-&gt;tx_queue</code> when an older response is waiting and send order must be preserved, or when a direct send accepts only a prefix and leaves a suffix to send later.</p>
+<p>The request and the queue entry have different lifetimes. Once <code>ksmbd_tcp_writev()</code> returns, the caller can free <code>ksmbd_work</code> and its READ buffer while the queue is still waiting for TCP. The previous implementation copied the outstanding bytes into <code>tcp_tx-&gt;data[]</code>, then TCP copied them again when the worker ran. With Patch 2, the queue entry, <code>struct tcp_tx</code>, holds references to the unsent data pages until the response is sent or the entry is cleaned up.</p>
+<h3 id="Recording-what-remains-after-a-short-send"><a href="#Recording-what-remains-after-a-short-send" class="headerlink" title="Recording what remains after a short send"></a>Recording what remains after a short send</h3><p><img src="/ksmbd-read-msg-splice-pages/tcp-tx-queue-memory-layout.png" alt="Queue entry layout, inline header bytes, and the payload offset after a short send"></p>
+<p><strong>Structure layout.</strong> In the 64-bit layout shown above, there are four bytes of alignment padding after <code>msg_flags</code>, at offsets 52–55. The new fields <code>nr_vecs</code> and <code>header_len</code> take two bytes each and fit in that gap. The fixed portion of the structure stays the same size.</p>
+<p><strong>Splitting the remaining bytes.</strong> The send offset can fall inside the header or partway through the payload. Because the payload comes last, the worker can calculate the split from the unsent length:</p>
+<figure class="highlight c"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line"><span class="type">size_t</span> left = tx-&gt;size - offset;          <span class="comment">// Bytes still to send</span></span><br><span class="line"><span class="type">size_t</span> len  = min(left, payload.iov_len); <span class="comment">// Remaining payload</span></span><br><span class="line"><span class="type">size_t</span> head = left - len;                 <span class="comment">// Remaining header</span></span><br></pre></td></tr></table></figure>
+
+<p>If an earlier response is queued and <code>offset = 0</code>, then <code>head = 84</code> and <code>len = 1 MiB</code>. The queue saves the 84-byte header inline after the <code>bvec</code> array and references the full payload. If 100 bytes have already been sent, those include the 84-byte header and 16 bytes of payload. Now <code>head = 0</code> and <code>len = 1,048,560</code>. The queue skips the first 16 payload bytes and stores no header.</p>
+<p><strong>Taking references.</strong> A single folio needs one <code>bvec</code>, set up with <code>bvec_set_virt</code>. For a vmalloc buffer, <code>iov_iter_extract_bvecs()</code> builds the vectors from its backing pages. The code calls <code>folio_get()</code> only after validation and the header copy succeed. An earlier error can therefore be handled with <code>kvfree(msg)</code>, without tracking a partially acquired set of references.</p>
+<h3 id="Why-store-the-queued-header-inline"><a href="#Why-store-the-queued-header-inline" class="headerlink" title="Why store the queued header inline?"></a>Why store the queued header inline?</h3><p>Our first version also allocated the queued header from <code>tx_frag_cache</code> and spliced it together with the payload in <code>bvec[0]</code>. During review, we found two problems with charging the queue for the memory it retained.</p>
+<ul>
+<li><strong>One page could be charged many times.</strong> Suppose 32 responses place their 84-byte headers in the same 32 KiB backing page. Charging <code>folio_size(header)</code> per entry consumes 1 MiB of queue allowance for that single page and can trigger flow control early.</li>
+<li><strong>Even an empty queue could reject the entry.</strong> With <code>sk_sndbuf &lt;= tx-&gt;size</code>, charging 32 KiB for the header plus the payload can exceed the queue limit on the first entry and force a copy.</li>
+</ul>
+<p>The final version copies the unsent header bytes inline after <code>msg-&gt;bvec</code> and charges their actual length, <code>head</code>. If any header remains, the worker sends it with ordinary <code>sock_sendmsg</code> and <code>MSG_MORE</code> to tell TCP that more data follows. As soon as the header is complete, the next iteration splices the payload pages.</p>
+<pre><code class="highlight mermaid">flowchart TD
+    Start[&quot;Take queue head, budget = 16 per lock hold&quot;] --&gt; Mode&#123;&quot;msg-&gt;nr_vecs &gt; 0?&quot;&#125;
+    Mode --&gt;|No| Copy[&quot;Send from msg-&gt;data + offset&quot;]
+    Mode --&gt;|Yes| Header&#123;&quot;offset &lt; header_len?&quot;&#125;
+    Header --&gt;|Yes| H[&quot;Send inline header with MSG_MORE&quot;]
+    Header --&gt;|No| P[&quot;Send bvec with MSG_SPLICE_PAGES&quot;]
+    Copy --&gt; Update[&quot;Advance offset and tx_sent by bytes accepted&quot;]
+    H --&gt; Update
+    P --&gt; Update
+    Update --&gt; Done&#123;&quot;Response complete?&quot;&#125;
+    Done --&gt;|Yes| Free[&quot;Update tx_queued, dequeue, release references&quot;]
+    Done --&gt;|No| Split&#123;&quot;Just finished the header?&quot;&#125;
+    Split --&gt;|Yes| Continue[&quot;Continue with payload&quot;]
+    Split --&gt;|No| Wait[&quot;Wait for write_space&quot;]</code></pre>
+
+<h3 id="Bounding-the-memory-held-by-the-queue"><a href="#Bounding-the-memory-held-by-the-queue" class="headerlink" title="Bounding the memory held by the queue"></a>Bounding the memory held by the queue</h3><p>A slow client can keep data pages queued for some time. Charging only for the unsent bytes would underestimate the physical memory the queue keeps alive. A page-backed entry is charged for <code>head</code> plus the full size of each retained folio. If the charge exceeds <code>max(sk_sndbuf, pdu_size)</code>, ksmbd falls back to copying.</p>
+<p>Likewise, a small unsent suffix should not pin an entire large folio. If fewer than <code>PAGE_SIZE</code> bytes remain, or <code>get_order(len) &lt; folio_order(folio)</code>, ksmbd copies the suffix so it can release the folio sooner.</p>
+<h3 id="Patch-2-results-with-Patch-1-already-applied"><a href="#Patch-2-results-with-Patch-1-already-applied" class="headerlink" title="Patch 2 results, with Patch 1 already applied"></a>Patch 2 results, with Patch 1 already applied</h3><p>We reran the baseline in each batch. This accounts for the small differences between the Patch 1 results above and the starting values below.</p>
+<table>
+<thead>
+<tr>
+<th align="right">Channels</th>
+<th>I&#x2F;O size</th>
+<th align="right">Throughput (MiB&#x2F;s)</th>
+<th align="right">Host CPU cost (Gcycles&#x2F;GiB)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="right">1</td>
+<td>256 KiB</td>
+<td align="right">3243.4 → 3414.6 (<strong>+5.3%</strong>)</td>
+<td align="right">4.511 → 3.497 (<strong>-22.5%</strong>)</td>
+</tr>
+<tr>
+<td align="right">1</td>
+<td>1 MiB</td>
+<td align="right">3145.6 → 3435.5 (<strong>+9.2%</strong>)</td>
+<td align="right">3.578 → 2.425 (<strong>-32.2%</strong>)</td>
+</tr>
+<tr>
+<td align="right">4</td>
+<td>64 KiB</td>
+<td align="right">4337.1 → 4448.3 (<strong>+2.6%</strong>)</td>
+<td align="right">2.977 → 3.000 (+0.8%)</td>
+</tr>
+<tr>
+<td align="right">4</td>
+<td>1 MiB</td>
+<td align="right">7705.3 → 8255.6 (<strong>+7.1%</strong>)</td>
+<td align="right">2.673 → 1.746 (<strong>-34.7%</strong>)</td>
+</tr>
+</tbody></table>
+<p><img src="/ksmbd-read-msg-splice-pages/read-splice-perf-comparison.png" alt="Throughput and host CPU cost for the direct send, queued send, and read-only page-cache prototype"></p>
+<p>Across the two patches, in the four-channel 1 MiB test, the fraction of bytes copied by the queue worker fell from <strong>16.2% to 1.0%</strong>, and P99 latency fell from about <strong>203 ms to 105 ms</strong>. Throughput rose from <strong>6660 to 8255.6 MiB&#x2F;s (+24%)</strong> and host CPU cost fell from <strong>3.879 to 1.746 Gcycles&#x2F;GiB (−55%)</strong>.</p>
+<h2 id="Could-TCP-send-the-page-cache-pages-directly"><a href="#Could-TCP-send-the-page-cache-pages-directly" class="headerlink" title="Could TCP send the page-cache pages directly?"></a>Could TCP send the page-cache pages directly?</h2><p>Both patches still use <code>kernel_read()</code> to copy from the page cache into a private READ buffer. NFSD can hand file pages directly to TCP through <code>nfsd_splice_read</code>. How much would ksmbd gain from a similar read path?</p>
+<p>We tried a VFS splice prototype on a <strong>read-only tmpfs mount</strong>, reusing the transport and queue changes. The hatched bars on the right of the figure show the results. With four channels and 1 MiB sequential reads, throughput rose from <strong>8292 to 8981 MiB&#x2F;s (+8.3%)</strong>. Host CPU cost fell from <strong>1.712 to 1.228 Gcycles&#x2F;GiB (−28.3%)</strong>.</p>
+<p>The read-only mount matters because a page reference keeps a page alive while allowing its contents to change. On a writable share, another SMB client or a local process could overwrite the file page after TCP takes a reference and before transmission or retransmission. The transmitted bytes could then differ from the bytes ksmbd originally read. If the response was signed, signature verification could fail at the receiver.</p>
+<p>The two proposed patches keep a private copy of the file data, which avoids this race on writable as well as read-only shares. Direct page-cache sends can be evaluated separately, starting with read-only filesystems (<code>sb_rdonly</code>). Extending the approach to writable shares requires accounting for what SMB read leases and oplocks can protect, including what happens when a local process writes to the file.</p>
+<h2 id="What-the-measurements-show"><a href="#What-the-measurements-show" class="headerlink" title="What the measurements show"></a>What the measurements show</h2><p>Larger SMB2 READ requests benefited most from eliminating payload copies. Under concurrency, the queue mattered even after the direct path could splice pages. Once the TCP send buffer filled up, the way ksmbd kept the outstanding bytes determined whether it had to pay for those copies again. In the four-channel 1 MiB test, Patch 2 alone reduced host CPU cycles per GiB by another 34.7% relative to Patch 1 in the same batch.</p>
+<p>Small requests, short reads that would pin oversized folios, small queued suffixes, entries over the memory limit, and encrypted or compressed responses can all use the existing copy path. That keeps page handling confined to eligible sends and bounds the memory a slow client can retain.</p>
+
+    </div>
+
+    
+    
+    
+
+    <footer class="post-footer">
+          
+
+<div class="post-copyright">
+<ul>
+  <li class="post-copyright-author">
+      <strong>Post author:  </strong>harry wayen
+  </li>
+  <li class="post-copyright-link">
+      <strong>Post link: </strong>
+      <a href="https://haryven.github.io/en/ksmbd-read-msg-splice-pages/" title="How ksmbd reduces data copies when sending SMB2 READ responses">https://haryven.github.io/en/ksmbd-read-msg-splice-pages/</a>
+  </li>
+  <li class="post-copyright-license">
+      <strong>Copyright Notice:  </strong>All articles in this blog are licensed under <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" rel="noopener" target="_blank"><i class="fab fa-fw fa-creative-commons"></i>BY-NC-SA</a> unless stating additionally.
+  </li>
+</ul>
+</div>
+
+          <div class="post-tags">
+              <a href="/tags/ksmbd/" rel="tag"># ksmbd</a>
+              <a href="/tags/SMB/" rel="tag"># SMB</a>
+              <a href="/tags/%E6%80%A7%E8%83%BD%E4%BC%98%E5%8C%96/" rel="tag"># 性能优化</a>
+              <a href="/tags/%E9%9B%B6%E6%8B%B7%E8%B4%9D/" rel="tag"># 零拷贝</a>
+              <a href="/tags/MSG-SPLICE-PAGES/" rel="tag"># MSG_SPLICE_PAGES</a>
+          </div>
+
+        
+
+          <div class="post-nav">
+            <div class="post-nav-item">
+                <a href="/ksmbd-read-msg-splice-pages/" rel="prev" title="ksmbd 如何减少 SMB2 READ 发送路径上的数据拷贝">
+                  <i class="fa fa-angle-left"></i> ksmbd 如何减少 SMB2 READ 发送路径上的数据拷贝
+                </a>
+            </div>
+            <div class="post-nav-item">
+                <a href="/hello-world/" rel="next" title="Hello World">
+                  Hello World <i class="fa fa-angle-right"></i>
+                </a>
+            </div>
+          </div>
+    </footer>
+  </article>
+</div>
+
+
+
+
+
+
+</div>
+  </main>
+
+  <footer class="footer">
+    <div class="footer-inner">
+
+  <div class="copyright">
+    &copy; 
+    <span itemprop="copyrightYear">2026</span>
+    <span class="with-love">
+      <i class="fa fa-heart"></i>
+    </span>
+    <span class="author" itemprop="copyrightHolder">harry wayen</span>
+  </div>
+  <div class="powered-by">Powered by <a href="https://hexo.io/" rel="noopener" target="_blank">Hexo</a> & <a href="https://theme-next.js.org/" rel="noopener" target="_blank">NexT.Gemini</a>
+  </div>
+
+    </div>
+  </footer>
+
+  
+  <div class="toggle sidebar-toggle" role="button">
+    <span class="toggle-line"></span>
+    <span class="toggle-line"></span>
+    <span class="toggle-line"></span>
+  </div>
+  <div class="sidebar-dimmer"></div>
+  <div class="back-to-top" role="button" aria-label="Back to top">
+    <i class="fa fa-arrow-up fa-lg"></i>
+    <span>0%</span>
+  </div>
+
+<noscript>
+  <div class="noscript-warning">Theme NexT works best with JavaScript enabled</div>
+</noscript>
+
+</body>
+</html>
